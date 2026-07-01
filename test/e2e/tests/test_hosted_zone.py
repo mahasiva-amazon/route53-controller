@@ -14,13 +14,14 @@
 """Integration tests for the Route53 HostedZone resource
 """
 
+import boto3
 import pytest
 import time
 
 from acktest import tags
 from acktest.k8s import resource as k8s
 from acktest.resources import random_suffix_name
-from e2e import service_marker, create_route53_resource, delete_route53_resource
+from e2e import service_marker, CRD_GROUP, CRD_VERSION, create_route53_resource, delete_route53_resource, load_eks_resource
 from e2e.replacement_values import REPLACEMENT_VALUES
 from e2e.bootstrap_resources import get_bootstrap_resources
 from e2e.tests.helper import Route53Validator
@@ -375,3 +376,86 @@ class TestHostedZone:
         time.sleep(DELETE_WAIT_AFTER_SECONDS)
 
         route53_validator.assert_hosted_zone(zone_id, exists=False)
+
+    def test_adoption_name_mismatch(self, route53_client):
+        """Adopting a zone with a wrong spec.name should result in ACK.Terminal condition.
+        After correcting spec.name to match the actual zone name, the resource should sync."""
+        suffix = random_suffix_name("", 8).lstrip("-")
+        actual_zone_name = f"ack-adopt-test-{suffix}.io."
+        wrong_zone_domain = f"wrong-domain-{suffix}.com."
+        cr_name = f"adoption-mismatch-{suffix}"
+
+        # Step 1: Create a real Route53 hosted zone directly via boto3 (not via ACK)
+        create_resp = route53_client.create_hosted_zone(
+            Name=actual_zone_name,
+            CallerReference=f"ack-test-{suffix}",
+        )
+        zone_id = create_resp["HostedZone"]["Id"]  # e.g. /hostedzone/ABCDEF123456
+
+        try:
+            # Step 2: Apply adoption CR with wrong spec.name pointing to the zone ID
+            replacements = REPLACEMENT_VALUES.copy()
+            replacements["ZONE_NAME"] = cr_name
+            replacements["WRONG_ZONE_DOMAIN"] = wrong_zone_domain
+            replacements["ZONE_ID"] = zone_id
+
+            resource_data = load_eks_resource(
+                "hosted_zone_adopt_name_mismatch",
+                additional_replacements=replacements,
+            )
+
+            ref = k8s.CustomResourceReference(
+                CRD_GROUP, CRD_VERSION, RESOURCE_PLURAL,
+                cr_name, namespace="default",
+            )
+            k8s.create_custom_resource(ref, resource_data)
+            k8s.wait_resource_consumed_by_controller(ref)
+
+            # Step 3: Wait for reconcile
+            time.sleep(MODIFY_WAIT_AFTER_SECONDS)
+
+            # Step 4: Assert ACK.Terminal condition is True
+            assert k8s.wait_on_condition(
+                ref, "ACK.Terminal", "True", wait_periods=5, period_length=5
+            ), "Expected ACK.Terminal condition to be True due to spec.name mismatch"
+
+            # Step 5: Assert the terminal message contains both zone names
+            terminal_cond = k8s.get_resource_condition(ref, "ACK.Terminal")
+            assert terminal_cond is not None
+            msg = terminal_cond.get("message", "")
+            assert wrong_zone_domain in msg or actual_zone_name in msg, (
+                f"Terminal message should reference mismatched names, got: {msg}"
+            )
+
+            # Step 6: Patch the CR with the correct spec.name
+            updates = {
+                "spec": {"name": actual_zone_name},
+            }
+            k8s.patch_custom_resource(ref, updates)
+
+            # Step 7: Wait for reconcile
+            time.sleep(MODIFY_WAIT_AFTER_SECONDS)
+
+            # Step 8: Assert ACK.Terminal is gone and ACK.ResourceSynced is True
+            assert k8s.wait_on_condition(
+                ref, "ACK.ResourceSynced", "True", wait_periods=10, period_length=5
+            ), "Expected ACK.ResourceSynced to be True after correcting spec.name"
+
+            terminal_cond_after = k8s.get_resource_condition(ref, "ACK.Terminal")
+            assert terminal_cond_after is None or terminal_cond_after.get("status") != "True", (
+                "ACK.Terminal should no longer be True after spec.name correction"
+            )
+
+        finally:
+            # Step 9: Cleanup - delete the CR (ignore errors if not present)
+            try:
+                k8s.delete_custom_resource(ref)
+                time.sleep(DELETE_WAIT_AFTER_SECONDS)
+            except Exception:
+                pass
+
+            # Delete the AWS zone regardless
+            try:
+                route53_client.delete_hosted_zone(Id=zone_id)
+            except Exception:
+                pass
