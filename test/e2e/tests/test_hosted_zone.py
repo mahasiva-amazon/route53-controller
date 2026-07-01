@@ -379,7 +379,13 @@ class TestHostedZone:
 
     def test_adoption_name_mismatch(self, route53_client):
         """Adopting a zone with a wrong spec.name should result in ACK.Terminal condition.
-        After correcting spec.name to match the actual zone name, the resource should sync."""
+        After deleting the CR and re-creating it with the correct spec.name, the adoption
+        should succeed and reach ACK.ResourceSynced: True.
+
+        Note: spec.name is immutable once set (enforced by the CRD validation rule),
+        so correcting a mismatch requires deleting the CR and recreating with the
+        correct name.
+        """
         suffix = random_suffix_name("", 8).lstrip("-")
         actual_zone_name = f"ack-adopt-test-{suffix}.io."
         wrong_zone_domain = f"wrong-domain-{suffix}.com."
@@ -392,6 +398,8 @@ class TestHostedZone:
         )
         zone_id = create_resp["HostedZone"]["Id"]  # e.g. /hostedzone/ABCDEF123456
 
+        ref = None
+        ref_correct = None
         try:
             # Step 2: Apply adoption CR with wrong spec.name pointing to the zone ID
             replacements = REPLACEMENT_VALUES.copy()
@@ -419,7 +427,7 @@ class TestHostedZone:
                 ref, "ACK.Terminal", "True", wait_periods=5, period_length=5
             ), "Expected ACK.Terminal condition to be True due to spec.name mismatch"
 
-            # Step 5: Assert the terminal message contains both zone names
+            # Step 5: Assert the terminal message contains zone name mismatch info
             terminal_cond = k8s.get_resource_condition(ref, "ACK.Terminal")
             assert terminal_cond is not None
             msg = terminal_cond.get("message", "")
@@ -427,34 +435,74 @@ class TestHostedZone:
                 f"Terminal message should reference mismatched names, got: {msg}"
             )
 
-            # Step 6: Patch the CR with the correct spec.name
-            updates = {
-                "spec": {"name": actual_zone_name},
-            }
-            k8s.patch_custom_resource(ref, updates)
+            # Step 6: Delete the CR with wrong spec.name
+            # spec.name is immutable (CRD CEL rule: self == oldSelf), so we must
+            # delete the CR and re-create it with the correct spec.name.
+            # We use deletion_policy=retain so the underlying AWS zone is NOT deleted.
+            k8s.patch_custom_resource(ref, {
+                "metadata": {
+                    "annotations": {
+                        "services.k8s.aws/deletion-policy": "retain"
+                    }
+                }
+            })
+            k8s.delete_custom_resource(ref)
+            time.sleep(DELETE_WAIT_AFTER_SECONDS)
 
-            # Step 7: Wait for reconcile
+            # Step 7: Re-create the CR with the correct spec.name
+            cr_name_correct = f"adoption-correct-{suffix}"
+            replacements_correct = REPLACEMENT_VALUES.copy()
+            replacements_correct["ZONE_NAME"] = cr_name_correct
+            replacements_correct["WRONG_ZONE_DOMAIN"] = actual_zone_name  # correct name this time
+            replacements_correct["ZONE_ID"] = zone_id
+
+            resource_data_correct = load_eks_resource(
+                "hosted_zone_adopt_name_mismatch",
+                additional_replacements=replacements_correct,
+            )
+
+            ref_correct = k8s.CustomResourceReference(
+                CRD_GROUP, CRD_VERSION, RESOURCE_PLURAL,
+                cr_name_correct, namespace="default",
+            )
+            k8s.create_custom_resource(ref_correct, resource_data_correct)
+            k8s.wait_resource_consumed_by_controller(ref_correct)
+
+            # Step 8: Wait for reconcile
             time.sleep(MODIFY_WAIT_AFTER_SECONDS)
 
-            # Step 8: Assert ACK.Terminal is gone and ACK.ResourceSynced is True
+            # Step 9: Assert ACK.Terminal is not set and ACK.ResourceSynced is True
             assert k8s.wait_on_condition(
-                ref, "ACK.ResourceSynced", "True", wait_periods=10, period_length=5
-            ), "Expected ACK.ResourceSynced to be True after correcting spec.name"
+                ref_correct, "ACK.ResourceSynced", "True", wait_periods=10, period_length=5
+            ), "Expected ACK.ResourceSynced to be True after correct spec.name adoption"
 
-            terminal_cond_after = k8s.get_resource_condition(ref, "ACK.Terminal")
+            terminal_cond_after = k8s.get_resource_condition(ref_correct, "ACK.Terminal")
             assert terminal_cond_after is None or terminal_cond_after.get("status") != "True", (
-                "ACK.Terminal should no longer be True after spec.name correction"
+                "ACK.Terminal should not be True after correct spec.name adoption"
             )
 
         finally:
-            # Step 9: Cleanup - delete the CR (ignore errors if not present)
-            try:
-                k8s.delete_custom_resource(ref)
-                time.sleep(DELETE_WAIT_AFTER_SECONDS)
-            except Exception:
-                pass
+            # Cleanup: delete both CRs with retain policy, then delete the AWS zone
+            for r in [ref, ref_correct]:
+                if r is None:
+                    continue
+                try:
+                    k8s.patch_custom_resource(r, {
+                        "metadata": {
+                            "annotations": {
+                                "services.k8s.aws/deletion-policy": "retain"
+                            }
+                        }
+                    })
+                except Exception:
+                    pass
+                try:
+                    k8s.delete_custom_resource(r)
+                    time.sleep(DELETE_WAIT_AFTER_SECONDS)
+                except Exception:
+                    pass
 
-            # Delete the AWS zone regardless
+            # Delete the AWS zone
             try:
                 route53_client.delete_hosted_zone(Id=zone_id)
             except Exception:
