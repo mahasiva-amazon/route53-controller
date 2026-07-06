@@ -112,11 +112,11 @@ func (r *resource) SetIdentifiers(identifier *ackv1alpha1.AWSIdentifiers) error 
 
 // PopulateResourceFromAnnotation populates the fields passed from adoption annotation
 func (r *resource) PopulateResourceFromAnnotation(fields map[string]string) error {
-	primaryKey, ok := fields["id"]
-	if !ok {
-		return ackerrors.NewTerminalError(fmt.Errorf("required field missing: id"))
+	// id maps to Status.ID (ChangeInfo ID). It is intentionally optional for
+	// adoption of pre-existing records, which have no associated ChangeInfo.
+	if primaryKey, ok := fields["id"]; ok && primaryKey != "" {
+		r.ko.Status.ID = &primaryKey
 	}
-	r.ko.Status.ID = &primaryKey
 	f0, ok := fields["hostedZoneID"]
 	if !ok {
 		return ackerrors.NewTerminalError(fmt.Errorf("required field missing: hostedZoneID"))
