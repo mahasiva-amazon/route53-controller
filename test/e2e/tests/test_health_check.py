@@ -77,6 +77,14 @@ class TestHealthCheck:
     def test_crud(self, route53_client, health_check):
         ref, cr = health_check
 
+        # Wait for the controller to reconcile and populate status.id before
+        # accessing it. wait_resource_consumed_by_controller only guarantees
+        # that 'status' exists in the resource, not that status.id is set.
+        # When the controller is busy (e.g. after heavy HostedZone activity),
+        # status.id may not be populated on the first reconcile pass.
+        assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=20)
+        cr = k8s.get_resource(ref)
+
         health_check_id = cr["status"]["id"]
 
         assert health_check_id
@@ -106,8 +114,11 @@ class TestHealthCheck:
     def test_crud_tags(self, route53_client, health_check):
         ref, cr = health_check
 
+        # Wait for controller to reconcile and populate status.id before accessing it.
+        # Use wait_periods=20 to handle controller queue backlog from prior tests.
+        assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=20)
         resource = k8s.get_resource(ref)
-        resource_id = cr["status"]["id"]
+        resource_id = resource["status"]["id"]
 
         time.sleep(CREATE_WAIT_AFTER_SECONDS)
 
