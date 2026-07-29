@@ -131,6 +131,8 @@ resources:
           operation: ListResourceRecordSets
           path: ResourceRecordSets.Weight
     hooks:
+      delta_pre_compare:
+        code: customPreCompare(delta, a, b)
       sdk_create_post_build_request:
         template_path: hooks/record_set/sdk_create_post_build_request.go.tpl
       sdk_delete_post_build_request:
@@ -141,8 +143,12 @@ resources:
         template_path: hooks/record_set/sdk_read_many_pre_set_output.go.tpl
       sdk_read_many_post_set_output:
         template_path: hooks/record_set/sdk_read_many_post_set_output.go.tpl
+      pre_set_resource_identifiers:
+        template_path: hooks/record_set/pre_set_resource_identifiers.go.tpl
       post_set_resource_identifiers:
         template_path: hooks/record_set/post_set_resource_identifiers.go.tpl
+      pre_populate_resource_from_annotation:
+        template_path: hooks/record_set/pre_populate_resource_from_annotation.go.tpl
       post_populate_resource_from_annotation:
         template_path: hooks/record_set/post_populate_resource_from_annotation.go.tpl
     list_operation:

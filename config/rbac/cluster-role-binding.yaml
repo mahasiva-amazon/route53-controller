@@ -8,5 +8,5 @@ roleRef:
   name: ack-route53-controller
 subjects:
 - kind: ServiceAccount
-  name: ack-route53-controller
+  name: ack--controller
   namespace: ack-system

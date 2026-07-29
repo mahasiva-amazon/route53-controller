@@ -88,6 +88,13 @@ func (r *resource) SetStatus(desired acktypes.AWSResource) {
 // SetIdentifiers sets the Spec or Status field that is referenced as the unique
 // resource identifier
 func (r *resource) SetIdentifiers(identifier *ackv1alpha1.AWSIdentifiers) error {
+	// ChangeInfo ID (NameOrID) is optional for adoption of pre-existing records.
+	// Inject a sentinel so the generated required-field guard passes; the post
+	// hook will clear Status.ID when it sees the sentinel.
+	if identifier.NameOrID == "" {
+		identifier.NameOrID = "\x00"
+	}
+
 	if identifier.NameOrID == "" {
 		return ackerrors.MissingNameIdentifier
 	}
@@ -96,6 +103,12 @@ func (r *resource) SetIdentifiers(identifier *ackv1alpha1.AWSIdentifiers) error 
 	f0, f0ok := identifier.AdditionalKeys["hostedZoneID"]
 	if f0ok {
 		r.ko.Spec.HostedZoneID = aws.String(f0)
+	}
+
+	// If the pre hook injected the empty-NameOrID sentinel, clear Status.ID so
+	// sdkFind skips the ChangeInfo lookup for adopted pre-existing records.
+	if r.ko.Status.ID != nil && *r.ko.Status.ID == "\x00" {
+		r.ko.Status.ID = nil
 	}
 
 	f1, f1ok := identifier.AdditionalKeys["recordType"]
@@ -112,6 +125,14 @@ func (r *resource) SetIdentifiers(identifier *ackv1alpha1.AWSIdentifiers) error 
 
 // PopulateResourceFromAnnotation populates the fields passed from adoption annotation
 func (r *resource) PopulateResourceFromAnnotation(fields map[string]string) error {
+	// id maps to Status.ID (ChangeInfo ID). It is intentionally optional for
+	// adoption of pre-existing records, which have no associated ChangeInfo.
+	// Inject an empty string so the generated required-field check passes;
+	// the post hook clears Status.ID when it finds the injected empty value.
+	if _, ok := fields["id"]; !ok {
+		fields["id"] = ""
+	}
+
 	primaryKey, ok := fields["id"]
 	if !ok {
 		return ackerrors.NewTerminalError(fmt.Errorf("required field missing: id"))
@@ -122,6 +143,12 @@ func (r *resource) PopulateResourceFromAnnotation(fields map[string]string) erro
 		return ackerrors.NewTerminalError(fmt.Errorf("required field missing: hostedZoneID"))
 	}
 	r.ko.Spec.HostedZoneID = &f0
+
+	// If the pre hook injected an empty "id" sentinel (absent from annotation),
+	// clear Status.ID so sdkFind skips the ChangeInfo lookup.
+	if r.ko.Status.ID != nil && *r.ko.Status.ID == "" {
+		r.ko.Status.ID = nil
+	}
 
 	if f1, f1ok := fields["recordType"]; f1ok {
 		r.ko.Spec.RecordType = &f1

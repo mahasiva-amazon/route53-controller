@@ -10,5 +10,5 @@ roleRef:
   name: route53-leader-election-role
 subjects:
 - kind: ServiceAccount
-  name: ack-route53-controller
+  name: ack--controller
   namespace: ack-system
